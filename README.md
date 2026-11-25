@@ -1,7 +1,5 @@
 # HR Analytics Data Lakehouse — prototype pédagogique
 
-**Statut : code généré, non validé de bout en bout.** Ce dépôt est un **starter project**, pas une garantie de ZIP entièrement fonctionnel. Les points d'intégration SQL Server, HDFS, Hive et les limites RAM doivent être testés sur la machine cible.
-
 ## Architecture
 SQL Server (source RH) → Kafka (6 topics) → Spark Structured Streaming → HDFS Bronze → Spark batch Silver → Gold → Hive/Beeline (option expérimental) et Spark SQL.
 
