@@ -1,0 +1,128 @@
+name: hr-lakehouse
+services:
+  sqlserver:
+    image: mcr.microsoft.com/mssql/server:2022-latest
+    profiles: [source]
+    environment:
+      ACCEPT_EULA: 'Y'
+      MSSQL_SA_PASSWORD: ${MSSQL_SA_PASSWORD:?Set MSSQL_SA_PASSWORD in .env}
+      MSSQL_PID: Developer
+    ports: ['1433:1433']
+    volumes: [sql_data:/var/opt/mssql]
+    networks: [hrnet]
+    mem_limit: 2g
+  broker:
+    image: apache/kafka:3.8.1
+    profiles: [ingest]
+    hostname: broker
+    environment:
+      KAFKA_NODE_ID: 1
+      KAFKA_PROCESS_ROLES: broker,controller
+      KAFKA_CONTROLLER_QUORUM_VOTERS: 1@broker:29093
+      KAFKA_LISTENERS: INTERNAL://0.0.0.0:29092,EXTERNAL://0.0.0.0:9092,CONTROLLER://0.0.0.0:29093
+      KAFKA_ADVERTISED_LISTENERS: INTERNAL://broker:29092,EXTERNAL://localhost:9092
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: INTERNAL:PLAINTEXT,EXTERNAL:PLAINTEXT,CONTROLLER:PLAINTEXT
+      KAFKA_INTER_BROKER_LISTENER_NAME: INTERNAL
+      KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
+      KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS: 0
+    ports: ['9092:9092']
+    volumes: [kafka_data:/var/lib/kafka/data]
+    networks: [hrnet]
+  kafka-ui:
+    image: ghcr.io/kafbat/kafka-ui:v1.1.0
+    profiles: [ingest]
+    depends_on: [broker]
+    environment:
+      KAFKA_CLUSTERS_0_NAME: hr-local
+      KAFKA_CLUSTERS_0_BOOTSTRAPSERVERS: broker:29092
+    ports: ['9000:8080']
+    networks: [hrnet]
+  namenode:
+    image: apache/hadoop:3.4.1
+    profiles: [storage]
+    hostname: namenode
+    command: ['bash','-c','if [ ! -d /hadoop/dfs/name/current ]; then hdfs namenode -format -force -nonInteractive; fi; hdfs namenode']
+    environment:
+      HADOOP_HOME: /opt/hadoop
+      HADOOP_CONF_DIR: /opt/hadoop/etc/hadoop
+    volumes:
+      - namenode_data:/hadoop/dfs/name
+      - ./hadoop/core-site.xml:/opt/hadoop/etc/hadoop/core-site.xml:ro
+      - ./hadoop/hdfs-site.xml:/opt/hadoop/etc/hadoop/hdfs-site.xml:ro
+    ports: ['9870:9870','8020:8020']
+    networks: [hrnet]
+  datanode:
+    image: apache/hadoop:3.4.1
+    profiles: [storage]
+    hostname: datanode
+    user: "0:0"
+    command: ['hdfs','datanode']
+    depends_on: [namenode]
+    volumes:
+      - datanode_data:/hadoop/dfs/data
+      - ./hadoop/core-site.xml:/opt/hadoop/etc/hadoop/core-site.xml:ro
+      - ./hadoop/hdfs-site.xml:/opt/hadoop/etc/hadoop/hdfs-site.xml:ro
+    networks: [hrnet]
+  spark:
+    build: ./docker/spark
+    profiles: [processing]
+    hostname: spark
+    command: ['bash','-lc','sleep infinity']
+    environment:
+      KAFKA_BOOTSTRAP: broker:29092
+      HDFS_URI: hdfs://namenode:8020
+    volumes:
+      - ./spark:/workspace/spark
+      - ./notebooks:/workspace/notebooks
+      - spark_checkpoints:/checkpoints
+      - ./hadoop/core-site.xml:/opt/spark/conf/core-site.xml:ro
+      - ./hadoop/hdfs-site.xml:/opt/spark/conf/hdfs-site.xml:ro
+    ports: ['4040:4040']
+    networks: [hrnet]
+  metastore-db:
+    image: postgres:16.6
+    profiles: [query]
+    environment:
+      POSTGRES_DB: metastore
+      POSTGRES_USER: hive
+      POSTGRES_PASSWORD: hive_dev_only
+    volumes: [metastore_data:/var/lib/postgresql/data]
+    networks: [hrnet]
+  hive-metastore:
+    image: apache/hive:4.0.1
+    profiles: [query]
+    depends_on: [metastore-db]
+    environment:
+      SERVICE_NAME: metastore
+      DB_DRIVER: postgres
+      SERVICE_OPTS: '-Djavax.jdo.option.ConnectionDriverName=org.postgresql.Driver -Djavax.jdo.option.ConnectionURL=jdbc:postgresql://metastore-db:5432/metastore -Djavax.jdo.option.ConnectionUserName=hive -Djavax.jdo.option.ConnectionPassword=hive_dev_only'
+    volumes:
+      - ./hive/postgresql-jar/postgresql-42.7.5.jar:/opt/hive/lib/postgresql-42.7.5.jar:ro
+      - ./hadoop/core-site.xml:/opt/hive/conf/core-site.xml:ro
+    ports: ['9083:9083']
+    networks: [hrnet]
+  hiveserver2:
+    image: apache/hive:4.0.1
+    profiles: [query]
+    depends_on: [hive-metastore]
+    environment:
+      SERVICE_NAME: hiveserver2
+      SKIP_SCHEMA_INIT: 'true'
+      SERVICE_OPTS: '-Dhive.metastore.uris=thrift://hive-metastore:9083'
+    volumes:
+      - ./hadoop/core-site.xml:/opt/hive/conf/core-site.xml:ro
+      - ./hadoop/hdfs-site.xml:/opt/hive/conf/hdfs-site.xml:ro
+    ports: ['10000:10000', '10002:10002']
+    networks: [hrnet]
+networks:
+  hrnet: {}
+volumes:
+  sql_data: {}
+  kafka_data: {}
+  namenode_data: {}
+  datanode_data: {}
+  spark_checkpoints: {}
+  metastore_data: {}
